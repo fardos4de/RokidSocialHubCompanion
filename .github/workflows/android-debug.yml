@@ -1,4 +1,4 @@
-name: Build Android debug APK
+name: Build Social Hub APKs
 
 on:
   workflow_dispatch:
@@ -35,12 +35,19 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Build phone and glasses debug APKs
+        run: gradle :app:assembleDebug :glassapp:assembleDebug --stacktrace
 
-      - name: Upload APK
+      - name: Upload phone APK
         uses: actions/upload-artifact@v4
         with:
           name: RokidSocialHubCompanion-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Upload glasses APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RokidSocialHubGlass-debug
+          path: glassapp/build/outputs/apk/debug/glassapp-debug.apk
           if-no-files-found: error
