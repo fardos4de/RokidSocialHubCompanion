@@ -15,7 +15,9 @@ import java.util.concurrent.CopyOnWriteArraySet
 /** Thin wrapper around Rokid's official Glass3 local classic-Bluetooth services. */
 object GlassTransport {
     private const val TAG = "SocialGlassTransport"
-    const val CLIENT_ID = "RokidSocialHubGlass"
+
+    // Match Rokid's documented/sample routing id during transport validation.
+    const val CLIENT_ID = "GlassSample"
 
     interface Listener {
         fun onTransportStateChanged(connected: Boolean, status: String)
@@ -58,12 +60,8 @@ object GlassTransport {
 
     private val clientCallback = object : IClientCallback.Stub() {
         override fun onReady() {
-            btService = GlassSdk.getClassicBluetoothService()
-            messageService = GlassSdk.getGlassMessageService()
-            btService?.setClassicBTListener(btListener)
-            messageService?.setMessageListener(messageListener)
-            connected = btService?.isConnect ?: false
-            updateState(if (connected) "Phone connected" else "Waiting for phone")
+            setupReadyServices()
+            updateState(if (connected) "Phone connected" else "Glass app ready — waiting for phone")
             if (connected) send("{\"v\":2,\"type\":\"sync_request\"}")
         }
     }
@@ -74,14 +72,31 @@ object GlassTransport {
         val appContext = context.applicationContext
 
         if (GlassSdk.isReady()) {
-            setupReadyServices()
+            // GlassSdk may already be alive in the system process. We still must register
+            // THIS app/client id so phone messages are routed into Social Hub.
+            try {
+                updateStatusOnly("Glass3 SDK ready — registering Social Hub")
+                GlassSdk.registerClient(CLIENT_ID, clientCallback)
+                setupReadyServices()
+                updateState(if (connected) "Phone connected" else "Glass app ready — waiting for phone")
+            } catch (t: Throwable) {
+                Log.e(TAG, "registerClient on ready SDK failed", t)
+                initialized = false
+                updateState("Glass client registration failed: ${t.javaClass.simpleName}")
+            }
             return
         }
 
         GlassSdk.bindSecurityService(appContext, object : IServiceConnectionCallback {
             override fun onServiceConnected() {
-                updateStatusOnly("Glass3 service connected")
-                GlassSdk.registerClient(CLIENT_ID, clientCallback)
+                updateStatusOnly("Glass3 service connected — registering Social Hub")
+                try {
+                    GlassSdk.registerClient(CLIENT_ID, clientCallback)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "registerClient failed", t)
+                    initialized = false
+                    updateState("Glass client registration failed: ${t.javaClass.simpleName}")
+                }
             }
 
             override fun onServiceDisconnected() {
@@ -105,7 +120,7 @@ object GlassTransport {
         btService?.setClassicBTListener(btListener)
         messageService?.setMessageListener(messageListener)
         connected = btService?.isConnect ?: false
-        updateState(if (connected) "Phone connected" else "Waiting for phone")
+        Log.d(TAG, "services ready, btConnected=$connected")
     }
 
     fun send(payload: String): Boolean {
@@ -133,6 +148,7 @@ object GlassTransport {
 
     private fun updateStatusOnly(value: String) {
         status = value
+        Log.d(TAG, value)
         listeners.forEach { listener -> runCatching { listener.onTransportStateChanged(connected, value) } }
     }
 
