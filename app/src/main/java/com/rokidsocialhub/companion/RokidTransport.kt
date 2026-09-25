@@ -2,6 +2,7 @@ package com.rokidsocialhub.companion
 
 import android.Manifest
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -14,6 +15,7 @@ import com.rokid.security.phone.sdk.base.data.EnvType
 import com.rokid.security.phone.sdk.base.data.NetServiceType
 import com.rokid.security.phone.sdk.base.data.UserAuthInfo
 import org.json.JSONObject
+import java.util.LinkedHashSet
 import java.util.concurrent.CopyOnWriteArraySet
 
 /**
@@ -22,20 +24,26 @@ import java.util.concurrent.CopyOnWriteArraySet
  */
 object RokidTransport {
     private const val TAG = "RokidTransport"
-    const val GLASS_CLIENT_ID = "RokidSocialHubGlass"
+
+    // Use Rokid's own sample client id for the transport-validation milestone.
+    // The glasses app registers the exact same id.
+    const val GLASS_CLIENT_ID = "GlassSample"
 
     interface Listener {
         fun onRokidStatusChanged(status: String)
     }
 
     private val listeners = CopyOnWriteArraySet<Listener>()
+    private val seenDevices = LinkedHashSet<String>()
+
     @Volatile private var appContext: Context? = null
     @Volatile private var sdkReady = false
+    @Volatile private var sdkInitializing = false
+    @Volatile private var listenersAttached = false
     @Volatile private var connected = false
     @Volatile private var scanning = false
     @Volatile private var connecting = false
-    @Volatile private var initialized = false
-    @Volatile private var status = "SDK starting"
+    @Volatile private var status = "SDK not initialized"
 
     private val messageListener = object : IMessageListener {
         override fun onClassicBTTextMessage(msg: String, clientId: String) {
@@ -48,21 +56,35 @@ object RokidTransport {
         override fun onDeviceFound(device: BluetoothDevice) {
             val context = appContext ?: return
             if (!hasBluetoothPermissions(context)) return
-            val name = try { device.name ?: "" } catch (_: SecurityException) { "" }
-            if (name.contains("Glass3", ignoreCase = true) && device.type != BluetoothDevice.DEVICE_TYPE_LE && !connected && !connecting) {
+
+            val name = safeName(device)
+            val displayName = if (name.isBlank()) "unnamed" else name
+            val descriptor = "$displayName [type=${device.type}]"
+            synchronized(seenDevices) {
+                if (seenDevices.size < 12) seenDevices.add(descriptor)
+            }
+            Log.d(TAG, "BT found: $descriptor")
+
+            if (isRokidCandidate(device, name) && !connected && !connecting) {
+                updateStatus("Found $displayName — connecting…")
                 connect(device)
+            } else if (!connected && !connecting) {
+                updateStatus("Scanning… saw ${seenDevices.size} Bluetooth device(s)")
             }
         }
 
         override fun onScanFinished() {
             scanning = false
-            if (!connected && !connecting) updateStatus("Glass3 not found — tap connect to scan again")
+            if (!connected && !connecting) {
+                val seen = synchronized(seenDevices) { seenDevices.joinToString(", ").ifBlank { "none" } }
+                updateStatus("No Rokid connection. Scan saw: $seen")
+            }
         }
 
         override fun onConnect(success: Boolean) {
             connecting = false
             connected = success
-            updateStatus(if (success) "Glass3 connected" else "Glass3 connection failed")
+            updateStatus(if (success) "Glass3 connected" else "Glass3 connection callback reported failure")
             if (success) sendFullSync()
         }
 
@@ -76,9 +98,14 @@ object RokidTransport {
     @JvmStatic
     fun initialize(context: Context) {
         appContext = context.applicationContext
-        if (initialized) return
-        initialized = true
-        updateStatus("Initializing Rokid SDK")
+        if (sdkReady) {
+            attachSdkListeners()
+            return
+        }
+        if (sdkInitializing) return
+
+        sdkInitializing = true
+        updateStatus("Initializing Rokid SDK…")
 
         try {
             val clientIds = arrayListOf(GLASS_CLIENT_ID)
@@ -91,27 +118,101 @@ object RokidTransport {
                 envType = EnvType.Companion.PUBLIC
             )
             PSecuritySDK.getMobileEngineService().initSDK(param) { result ->
+                sdkInitializing = false
                 sdkReady = result.isSuccess
                 if (result.isSuccess) {
-                    PSecuritySDK.getClassicBlueToothClientService()?.addClientListener(btListener)
-                    PSecuritySDK.getMessageService()?.addMessageListener(messageListener)
+                    attachSdkListeners()
                     updateStatus("SDK ready — Glass3 disconnected")
-                    if (hasBluetoothPermissions(context)) startScan()
+                    if (hasBluetoothPermissions(context)) ensureConnected()
                 } else {
-                    updateStatus("Rokid SDK initialization failed")
+                    // Important: leave retry possible after runtime permissions have been granted.
+                    updateStatus("Rokid SDK initialization failed — tap Connect to retry")
                 }
             }
         } catch (t: Throwable) {
+            sdkInitializing = false
+            sdkReady = false
             Log.e(TAG, "SDK initialization failed", t)
-            updateStatus("Rokid SDK error: ${t.javaClass.simpleName}")
+            updateStatus("Rokid SDK error: ${t.javaClass.simpleName} — tap Connect to retry")
         }
+    }
+
+    private fun attachSdkListeners() {
+        if (listenersAttached) return
+        try {
+            PSecuritySDK.getClassicBlueToothClientService()?.addClientListener(btListener)
+            PSecuritySDK.getMessageService()?.addMessageListener(messageListener)
+            listenersAttached = true
+        } catch (t: Throwable) {
+            Log.e(TAG, "Unable to attach Rokid listeners", t)
+            listenersAttached = false
+            updateStatus("Rokid listener setup failed: ${t.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * Entry point used by the UI after Bluetooth permissions are granted.
+     * Prefer an already-paired Rokid/Glass device, then fall back to discovery.
+     */
+    @JvmStatic
+    fun ensureConnected() {
+        val context = appContext ?: return
+        if (!hasBluetoothPermissions(context)) {
+            updateStatus("Bluetooth permission required")
+            return
+        }
+        if (!sdkReady) {
+            initialize(context)
+            return
+        }
+
+        try {
+            val service = PSecuritySDK.getClassicBlueToothClientService()
+            if (service?.isConnected() == true) {
+                connected = true
+                connecting = false
+                scanning = false
+                updateStatus("Glass3 already connected")
+                sendFullSync()
+                return
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Could not query current Rokid BT state", t)
+        }
+
+        val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val adapter = manager?.adapter
+        if (adapter == null) {
+            updateStatus("Bluetooth is not supported on this phone")
+            return
+        }
+        if (!adapter.isEnabled) {
+            updateStatus("Bluetooth is OFF — enable it and tap Connect again")
+            return
+        }
+
+        try {
+            val pairedCandidates = adapter.bondedDevices
+                .filter { it.type != BluetoothDevice.DEVICE_TYPE_LE }
+                .filter { isRokidCandidate(it, safeName(it)) }
+            if (pairedCandidates.isNotEmpty()) {
+                val target = pairedCandidates.first()
+                updateStatus("Using paired ${safeName(target).ifBlank { "Rokid glasses" }} — connecting…")
+                connect(target)
+                return
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Unable to inspect paired devices", t)
+        }
+
+        startScan()
     }
 
     @JvmStatic
     fun startScan() {
         val context = appContext ?: return
         if (!sdkReady) {
-            updateStatus("Rokid SDK is not ready yet")
+            initialize(context)
             return
         }
         if (!hasBluetoothPermissions(context)) {
@@ -119,8 +220,9 @@ object RokidTransport {
             return
         }
         try {
+            seenDevices.clear()
             scanning = true
-            updateStatus("Scanning for Glass3…")
+            updateStatus("Scanning for Rokid/Glass Bluetooth device…")
             PSecuritySDK.getClassicBlueToothClientService()?.startScan(15_000L)
         } catch (t: Throwable) {
             scanning = false
@@ -130,10 +232,11 @@ object RokidTransport {
     }
 
     private fun connect(device: BluetoothDevice) {
+        if (connected || connecting) return
         try {
             scanning = false
             connecting = true
-            val name = try { device.name ?: "Glass3" } catch (_: SecurityException) { "Glass3" }
+            val name = safeName(device).ifBlank { "Rokid glasses" }
             updateStatus("Connecting to $name…")
             PSecuritySDK.getClassicBlueToothClientService()?.stopScan()
             PSecuritySDK.getClassicBlueToothClientService()?.connectToServer(device) { success ->
@@ -144,9 +247,21 @@ object RokidTransport {
             }
         } catch (t: Throwable) {
             connecting = false
+            connected = false
             Log.e(TAG, "BT connect failed", t)
             updateStatus("Connection error: ${t.javaClass.simpleName}")
         }
+    }
+
+    private fun isRokidCandidate(device: BluetoothDevice, name: String): Boolean {
+        if (device.type == BluetoothDevice.DEVICE_TYPE_LE) return false
+        if (name.isBlank()) return false
+        val lower = name.lowercase()
+        return lower.contains("glass3") || lower.contains("rokid") || lower.contains("glass")
+    }
+
+    private fun safeName(device: BluetoothDevice): String {
+        return try { device.name ?: "" } catch (_: SecurityException) { "" }
     }
 
     @JvmStatic
@@ -204,20 +319,14 @@ object RokidTransport {
         }
     }
 
-    @JvmStatic
-    fun getStatus(): String = status
-
-    @JvmStatic
-    fun isConnected(): Boolean = connected
-
-    @JvmStatic
-    fun addListener(listener: Listener) { listeners.add(listener) }
-
-    @JvmStatic
-    fun removeListener(listener: Listener) { listeners.remove(listener) }
+    @JvmStatic fun getStatus(): String = status
+    @JvmStatic fun isConnected(): Boolean = connected
+    @JvmStatic fun addListener(listener: Listener) { listeners.add(listener) }
+    @JvmStatic fun removeListener(listener: Listener) { listeners.remove(listener) }
 
     private fun updateStatus(value: String) {
         status = value
+        Log.d(TAG, value)
         listeners.forEach { listener ->
             try { listener.onRokidStatusChanged(value) } catch (_: Throwable) { }
         }
