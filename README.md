@@ -1,44 +1,49 @@
 # Rokid Social Hub Companion
 
-Android phone-side companion for a planned Rokid social-messaging hub.
+Android phone-side companion for the Rokid Social Hub project.
 
-**Current release:** `0.1.0` (App 1, foundation build)
+**Current release:** `0.2.0` (App 1 + official Rokid Bluetooth transport)
 
-## What v0.1 does
+## Validated v0.1 foundation
 
-- Captures notification-visible messages from WhatsApp, WhatsApp Business, and Telegram after the user explicitly grants Android Notification Access.
-- Keeps a bounded local cache and exposes the 5 most recent conversations / 20 most recent messages in the test UI.
-- Detects Android notification `RemoteInput` reply actions and can reply through the same supported notification action.
-- Queues text replies when the phone has no validated internet connection and retries when connectivity returns.
-- Shows Bluetooth availability and paired-device state; no proprietary Rokid SDK is required in this app.
-- Defines protocol-v1 JSON payloads that App 2 (the glasses client) can consume later.
-- Stores data only on-device in an app-private SQLite database.
+The first device test confirmed all three phone-side fundamentals on the target Android phone:
 
-## Important scope limits in v0.1
+- WhatsApp notifications are captured and cached correctly.
+- Telegram notifications are captured and cached correctly.
+- Android notification `RemoteInput` replies successfully send real messages.
 
-This release intentionally does **not** pretend to be a full WhatsApp client. It does not bypass WhatsApp encryption, scrape WhatsApp's private database, or emulate an unofficial linked device. WhatsApp history is limited to content Android exposes through notifications.
+## What v0.2 adds
 
-Telegram TDLib login/history, voice-note transfer, real glasses Bluetooth transport, and AIUI commands are later milestones. The architecture keeps those pieces separate so they can be added without replacing the phone-side cache/outbox.
+- Official Rokid Phone SDK `2.2.0-E` from Rokid's public Maven repository.
+- Classic-Bluetooth Glass3 discovery and connection; no Wi-Fi/P2P is required for normal Social Hub synchronization.
+- Protocol v2 synchronization of the 5 most recent conversations.
+- On-demand synchronization of up to 20 cached messages for an opened conversation.
+- Glass-to-phone `reply_text` commands routed through the already validated WhatsApp/Telegram notification reply path.
+- Phone-side reply results and updated conversation/message synchronization.
+- Automatic push of the recent-conversation list when a new supported notification arrives.
+- All Rokid cloud/network services are disabled in the SDK transport layer; empty AK/SK values are used because this milestone only needs the local Bluetooth channel.
 
-## Install / run locally
+## Current WhatsApp/Telegram scope
 
-1. Open the project in a current Android Studio release.
-2. Let Android Studio install Android SDK 35 if necessary.
-3. Build and install the `debug` variant on the Android phone.
-4. Launch **Rokid Social Hub**.
-5. Tap **Grant notification access** and enable the app.
-6. Tap **Allow Nearby devices / Bluetooth**.
-7. Receive a WhatsApp or Telegram notification, then return to Social Hub. The conversation should appear under **Recent conversations**.
-8. Tap the conversation to inspect the cached messages. If the current notification exposes a reply action, **Reply** can send through that action.
+This application does **not** emulate an unofficial WhatsApp linked device, bypass WhatsApp encryption, or scrape WhatsApp's private database. WhatsApp history remains limited to information Android exposes to the notification listener. Telegram TDLib will be a later enhancement for full Telegram account history/media behavior.
+
+## Install / test phone v0.2
+
+1. Install the current debug APK over v0.1.
+2. Keep Notification Access enabled.
+3. Grant both Nearby Devices / Bluetooth permissions when requested.
+4. Tap **Allow Bluetooth / connect Rokid Glass3**.
+5. The app scans for a non-LE device whose name contains `Glass3` and connects using Rokid's official phone SDK.
+6. Once App 2 is installed on the glasses, the phone will send the current 5-chat snapshot automatically.
 
 ## Build with GitHub Actions
 
-The repository includes `.github/workflows/android-debug.yml`. Every push to `main` or manual workflow run builds a debug APK and uploads it as the `RokidSocialHubCompanion-debug` artifact.
+The repository includes `.github/workflows/android-debug.yml`. A push to `main` builds a debug APK and uploads it as an artifact.
 
 ## Project order
 
-1. **App 1 — Android companion** (this repository)
-2. **App 2 — Rokid glasses Social Hub UI / Bluetooth client**
-3. **App 3 — AIUI agent bridge** for natural-language actions such as reading messages, replying, playing voice notes and recording/sending voice notes
+1. **App 1 — Android companion** — notification/reply foundation validated; official Rokid Bluetooth transport now being integrated.
+2. **App 2 — Rokid glasses Social Hub** — next: recent chats, 20-message view, Bluetooth reply round-trip and offline cache.
+3. **App 3 — AIUI agent bridge** — natural-language read/reply/play/record/send actions after App 2 transport is proven.
 
-See `docs/ROADMAP.md` for the milestone plan and `docs/PROTOCOL.md` for the phone↔glasses contract.
+See `docs/ROADMAP.md` and `docs/PROTOCOL.md` for design details.
