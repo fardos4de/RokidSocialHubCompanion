@@ -10,6 +10,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -23,6 +24,8 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.text.DateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -32,11 +35,14 @@ import java.util.Set;
 public final class MainActivity extends Activity implements NetworkState.Listener, RokidTransport.Listener {
     private static final int REQUEST_BLUETOOTH = 1001;
     private static final int REQUEST_ENABLE_BLUETOOTH = 1002;
+    private static final int REQUEST_EXPORT_LOG = 1003;
     private TextView internetStatus, notificationStatus, bluetoothStatus, outboxStatus;
     private LinearLayout conversationsContainer;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        DiagnosticLog.initialize(this);
+        DiagnosticLog.log("MainActivity", "onCreate");
         NetworkState.get(this).addListener(this);
         RokidTransport.initialize(this);
         RokidTransport.addListener(this);
@@ -45,6 +51,7 @@ public final class MainActivity extends Activity implements NetworkState.Listene
     }
 
     @Override protected void onDestroy() {
+        DiagnosticLog.log("MainActivity", "onDestroy");
         NetworkState.get(this).removeListener(this);
         RokidTransport.removeListener(this);
         super.onDestroy();
@@ -52,12 +59,14 @@ public final class MainActivity extends Activity implements NetworkState.Listene
 
     @Override protected void onResume() {
         super.onResume();
+        DiagnosticLog.log("MainActivity", "onResume");
         OutboxProcessor.flush(this);
         RokidTransport.initialize(this);
         refresh();
     }
 
     @Override public void onNetworkStateChanged(boolean online) {
+        DiagnosticLog.log("MainActivity", "Network state changed online="+online);
         runOnUiThread(() -> { if (online) OutboxProcessor.flush(this); refresh(); });
     }
 
@@ -73,7 +82,7 @@ public final class MainActivity extends Activity implements NetworkState.Listene
         scroll.addView(root);
 
         root.addView(text("Rokid Social Hub", 28, true));
-        TextView subtitle = text("Phone companion · App 1 · v0.2.1 diagnostic transport", 15, false);
+        TextView subtitle = text("Phone companion · App 1 · v0.2.2 connection logger", 15, false);
         subtitle.setPadding(0,0,0,dp(20));
         root.addView(subtitle);
 
@@ -91,8 +100,24 @@ public final class MainActivity extends Activity implements NetworkState.Listene
         root.addView(notificationAccess);
 
         Button bluetooth=button("Connect / diagnose Rokid Glass3");
-        bluetooth.setOnClickListener(v -> requestBluetoothPermissionAndConnect());
+        bluetooth.setOnClickListener(v -> {
+            DiagnosticLog.log("MainActivity", "USER pressed Connect / diagnose Rokid Glass3");
+            DiagnosticLog.logEnvironmentSnapshot(this, "user_connect_button");
+            requestBluetoothPermissionAndConnect();
+        });
         root.addView(bluetooth);
+
+        Button newLog=button("Start a new diagnostic log");
+        newLog.setOnClickListener(v -> {
+            DiagnosticLog.startNewSession();
+            DiagnosticLog.logEnvironmentSnapshot(this, "manual_new_log");
+            Toast.makeText(this,"New diagnostic log started. Now press Connect / diagnose.",Toast.LENGTH_LONG).show();
+        });
+        root.addView(newLog);
+
+        Button exportLog=button("Export diagnostic log (.txt)");
+        exportLog.setOnClickListener(v -> exportDiagnosticLog());
+        root.addView(exportLog);
 
         Button refresh=button("Refresh / retry queued replies");
         refresh.setOnClickListener(v -> {
@@ -123,6 +148,10 @@ public final class MainActivity extends Activity implements NetworkState.Listene
                 .show());
         root.addView(clear);
 
+        TextView privacy=text("Diagnostic log contains Bluetooth device names/addresses and connection errors. It does not contain WhatsApp/Telegram message text.",13,false);
+        privacy.setPadding(0,dp(16),0,dp(4));
+        root.addView(privacy);
+
         TextView section=text("Recent conversations",20,true);
         section.setPadding(0,dp(24),0,dp(8));
         root.addView(section);
@@ -133,6 +162,20 @@ public final class MainActivity extends Activity implements NetworkState.Listene
         conversationsContainer.setOrientation(LinearLayout.VERTICAL);
         root.addView(conversationsContainer);
         setContentView(scroll);
+    }
+
+    private void exportDiagnosticLog() {
+        DiagnosticLog.log("MainActivity", "USER requested diagnostic log export");
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("text/plain");
+        intent.putExtra(Intent.EXTRA_TITLE, DiagnosticLog.getSuggestedFileName());
+        try {
+            startActivityForResult(intent, REQUEST_EXPORT_LOG);
+        } catch (Exception e) {
+            DiagnosticLog.logError("MainActivity", "Unable to open export document picker", e);
+            Toast.makeText(this,"Could not open file exporter: "+e.getClass().getSimpleName(),Toast.LENGTH_LONG).show();
+        }
     }
 
     private void refresh() {
@@ -224,13 +267,18 @@ public final class MainActivity extends Activity implements NetworkState.Listene
     }
 
     private void requestBluetoothPermissionAndConnect(){
+        DiagnosticLog.log("MainActivity", "requestBluetoothPermissionAndConnect() SDK="+Build.VERSION.SDK_INT);
         if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.S){
-            if(checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)!=PackageManager.PERMISSION_GRANTED ||
-                    checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)!=PackageManager.PERMISSION_GRANTED){
+            boolean scanGranted=checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN)==PackageManager.PERMISSION_GRANTED;
+            boolean connectGranted=checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED;
+            DiagnosticLog.log("MainActivity", "Runtime BT permissions scan="+scanGranted+" connect="+connectGranted);
+            if(!scanGranted || !connectGranted){
+                DiagnosticLog.log("MainActivity", "Requesting BLUETOOTH_SCAN + BLUETOOTH_CONNECT");
                 requestPermissions(new String[]{Manifest.permission.BLUETOOTH_SCAN,Manifest.permission.BLUETOOTH_CONNECT},REQUEST_BLUETOOTH);
                 return;
             }
         } else if(checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)!=PackageManager.PERMISSION_GRANTED){
+            DiagnosticLog.log("MainActivity", "Requesting ACCESS_FINE_LOCATION for pre-Android-12 BT scan");
             requestPermissions(new String[]{Manifest.permission.ACCESS_FINE_LOCATION},REQUEST_BLUETOOTH);
             return;
         }
@@ -238,10 +286,13 @@ public final class MainActivity extends Activity implements NetworkState.Listene
         BluetoothManager manager=(BluetoothManager)getSystemService(Context.BLUETOOTH_SERVICE);
         BluetoothAdapter adapter=manager==null?null:manager.getAdapter();
         if(adapter==null){
+            DiagnosticLog.log("MainActivity", "Bluetooth adapter unavailable");
             Toast.makeText(this,"Bluetooth is not available on this phone.",Toast.LENGTH_LONG).show();
             return;
         }
+        DiagnosticLog.log("MainActivity", "Android Bluetooth enabled="+adapter.isEnabled()+" state="+adapter.getState());
         if(!adapter.isEnabled()){
+            DiagnosticLog.log("MainActivity", "Requesting user to enable Bluetooth");
             startActivityForResult(new Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE), REQUEST_ENABLE_BLUETOOTH);
             return;
         }
@@ -255,7 +306,11 @@ public final class MainActivity extends Activity implements NetworkState.Listene
         super.onRequestPermissionsResult(requestCode,permissions,grantResults);
         if(requestCode==REQUEST_BLUETOOTH){
             boolean ok=grantResults.length>0;
-            for(int r:grantResults)ok&=r==PackageManager.PERMISSION_GRANTED;
+            for(int i=0;i<grantResults.length;i++){
+                String name=i<permissions.length?permissions[i]:"unknown";
+                DiagnosticLog.log("MainActivity", "Permission result "+name+" => "+grantResults[i]);
+                ok&=grantResults[i]==PackageManager.PERMISSION_GRANTED;
+            }
             if(ok) requestBluetoothPermissionAndConnect();
             else Toast.makeText(this,"Bluetooth scan and connection permissions are needed.",Toast.LENGTH_LONG).show();
             refresh();
@@ -265,9 +320,28 @@ public final class MainActivity extends Activity implements NetworkState.Listene
     @Override protected void onActivityResult(int requestCode,int resultCode,Intent data){
         super.onActivityResult(requestCode,resultCode,data);
         if(requestCode==REQUEST_ENABLE_BLUETOOTH){
+            DiagnosticLog.log("MainActivity", "Bluetooth enable activity resultCode="+resultCode);
             if(resultCode==RESULT_OK) requestBluetoothPermissionAndConnect();
             else Toast.makeText(this,"Bluetooth must be enabled to connect the glasses.",Toast.LENGTH_LONG).show();
             refresh();
+            return;
+        }
+        if(requestCode==REQUEST_EXPORT_LOG){
+            if(resultCode!=RESULT_OK || data==null || data.getData()==null){
+                DiagnosticLog.log("MainActivity", "Diagnostic export cancelled resultCode="+resultCode);
+                return;
+            }
+            Uri uri=data.getData();
+            try(OutputStream output=getContentResolver().openOutputStream(uri,"w")){
+                if(output==null) throw new IllegalStateException("ContentResolver returned null OutputStream");
+                byte[] bytes=DiagnosticLog.getText().getBytes(StandardCharsets.UTF_8);
+                output.write(bytes);
+                output.flush();
+                Toast.makeText(this,"Diagnostic log exported. Send that .txt file to me here.",Toast.LENGTH_LONG).show();
+            }catch(Exception e){
+                DiagnosticLog.logError("MainActivity", "Diagnostic log export failed", e);
+                Toast.makeText(this,"Log export failed: "+e.getClass().getSimpleName(),Toast.LENGTH_LONG).show();
+            }
         }
     }
 
