@@ -1,0 +1,49 @@
+name: Build Lumen Instagram
+
+on:
+  push:
+    branches:
+      - build-lumen-instagram
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone upstream lumen-instagram
+        run: |
+          git clone https://github.com/beyondlevi/lumen-instagram.git
+          cd lumen-instagram
+          git checkout 02609bf58c29836136983d727ec0df19d4c481da
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: lumen-instagram/package-lock.json
+
+      - name: Install dependencies
+        working-directory: lumen-instagram
+        run: npm ci
+
+      - name: Build package
+        working-directory: lumen-instagram
+        run: npm run package
+
+      - name: Verify package
+        working-directory: lumen-instagram
+        run: |
+          test -f dist/lumen-instagram.mrbd.zip
+          unzip -l dist/lumen-instagram.mrbd.zip
+          unzip -p dist/lumen-instagram.mrbd.zip manifest.webmanifest | tee /tmp/manifest.webmanifest
+          grep -q 'lumen_internet' /tmp/manifest.webmanifest
+          sha256sum dist/lumen-instagram.mrbd.zip
+
+      - name: Upload MRBD package
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumen-instagram-mrbd
+          path: lumen-instagram/dist/lumen-instagram.mrbd.zip
+          if-no-files-found: error
+          retention-days: 30
