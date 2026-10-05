@@ -1,0 +1,41 @@
+name: Build Lumen WhatsApp
+
+on:
+  push:
+    branches:
+      - build-lumen-whatsapp
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone upstream lumen-whatsapp
+        run: git clone https://github.com/beyondlevi/lumen-whatsapp.git
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: lumen-whatsapp/package-lock.json
+
+      - name: Install dependencies
+        working-directory: lumen-whatsapp
+        run: npm ci
+
+      - name: Build package
+        working-directory: lumen-whatsapp
+        run: npm run package
+
+      - name: Verify package
+        run: |
+          test -f lumen-whatsapp/dist/lumen-whatsapp.mrbd.zip
+          unzip -l lumen-whatsapp/dist/lumen-whatsapp.mrbd.zip | head -50
+
+      - name: Upload MRBD package
+        uses: actions/upload-artifact@v4
+        with:
+          name: lumen-whatsapp-mrbd
+          path: lumen-whatsapp/dist/lumen-whatsapp.mrbd.zip
+          if-no-files-found: error
